@@ -322,3 +322,309 @@ Kubernetes 환경 모니터링은 처음부터 다시 생각해서 접근해야 
 **Our Goal**: 시스템 통찰력 확보, 복원력 향상, 궁극적으로 애플리케이션의 더 나은 최종 사용자 경험 제공
 
 분산 애플리케이션과 Kubernetes 같은 분산 시스템 모니터링은 많은 작업 필요하므로 도입할 때부터 준비가 필요하다는 사실.
+
+
+---
+# **Kubernetes 구성, 암호 및 RBAC**
+
+Kubernetes에서 **구성과 코드의 엄격한 분리**는 클라우드 네이티브 애플리케이션 개발의 핵심 원칙
+
+컨테이너의 컴포저블(조합 가능한) 특성을 활용하여 런타임에 구성 데이터를 주입함으로써 애플리케이션 기능과 실행 환경을 분리 가능
+
+민감한 데이터가 Kubernetes API 객체로 이동할 때는 RBAC(역할 기반 접근 제어)를 통한 API 접근 보호가 필수적
+
+### ConfigMap - 비민감 구성 데이터 관리
+
+- **용도**: 민감하지 않은 구성 데이터 저장
+- **지원 형식**:
+    - 키/값 쌍
+    - JSON, XML 등 복잡한 벌크 데이터
+    - `|` 기호를 사용한 전체 블록 원시 데이터
+
+사용 대상
+
+- 파드 (Pods)
+- 컨트롤러 (Controllers)
+- CRD (Custom Resource Definitions)
+- 운영자 (Operators)
+- 기타 복잡한 시스템 서비스
+
+주입 방법
+
+1. **볼륨 마운트**: 파일 시스템으로 마운트
+2. **환경 변수**:
+    - `envFrom`: 모든 키/값 쌍을 환경 변수로 로드
+    - `configMapKeyRef`: 개별 키의 값을 특정 환경 변수에 할당
+3. **명령줄 인수**: `$(ENV_KEY)` 보간 구문 사용
+
+예시 구성
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-http-config
+  namespace: myapp-prod
+data:
+  config: |
+    http {
+      server {
+        location / {
+          root /data/html;
+        }
+        location /images/ {
+          root /data;
+        }
+      }
+    }
+
+```
+
+### Secret - 민감 데이터 관리
+
+- **인코딩**: Base64 (암호화 아님)
+- **크기 제한**: 1MB (실제 데이터 약 750KB)
+- **보안 특징**:
+    - 필요한 노드의 tmpfs에만 마운트
+    - 파드 삭제 시 자동 제거
+    - 노드 디스크에 남지 않음
+
+etcd 저장 보안
+
+- **중요한 보안 고려사항**: 기본적으로 Secret은 etcd에 평문으로 저장
+- **보안 강화 방법**:
+    - etcd 노드 간 mTLS 설정
+    - etcd 데이터의 미사용 암호화 활성화
+    - KMS(Key Management System) 제공자 사용
+    - 외부 시크릿 관리 시스템 활용
+
+- Secret 유형
+    
+    1. Generic Secret
+    
+    ```bash
+    kubectl create secret generic mysecret \
+      --from-literal=key1=$3cr3t1 \
+      --from-literal=key2=@3cr3t2
+    ```
+    
+    2. Docker Registry Secret
+    
+    ```bash
+    kubectl create secret docker-registry registryKey \
+      --docker-server=myreg.azurecr.io \
+      --docker-username=myreg \
+      --docker-password=$up3r$3cr3tP@ssw0rd \
+      --docker-email=ignore@dummy.com
+    
+    ```
+    
+    3. TLS Secret
+    
+    ```bash
+    kubectl create secret tls www-tls \
+      --key=./path_to_key/wwwtls.key \
+      --cert=./path_to_crt/wwwtls.crt
+    ```
+    
+
+### ConfigMap/Secret 공통 모범 사례
+
+**동적 변경 지원**
+
+- **권장 방법**:
+    - ConfigMap/Secret을 **볼륨으로 마운트**
+    - 애플리케이션에 **파일 워처** 구성
+    - 변경된 파일 데이터 감지 및 재구성 자동화
+- **주의사항**:
+    - `volumeMounts.subPath` 속성 사용 금지 (동적 업데이트 불가)
+- 배포 전 검증
+    - ConfigMap/Secret은 파드 배포 **이전에** 해당 네임스페이스에 존재해야 함
+    - 선택적 플래그를 사용하여 존재하지 않을 경우 파드 시작 방지 가능
+    - 어드미션 컨트롤러를 통한 특정 구성 데이터 보장
+- CI/CD 통합
+    - **구성 변경 반영 전략**:
+        1. ConfigMap/Secret의 `name` 속성 업데이트
+        2. 배포의 참조도 함께 업데이트
+        3. Kubernetes 업데이트 전략을 통한 배포 트리거
+- **Helm 사용 시**
+    - annotation을 이용해서 컨피그맵,시크릿의 sha256 checksum을 확인
+        
+        ```yaml
+        annotations:
+          checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        ```
+        
+    - 위 데이터가 변경 시, helm upgrade를 통해 deployment 알아서 업데이트함
+- 환경 변수 매핑 규칙
+    - configMapKeyRef/secretKeyRef 사용 시:
+        - 해당 키가 존재하지 않으면 **파드 시작 실패**
+- envFrom 사용 시:
+    - 유효하지 않은 환경 변수 키는 건너뛰지만 **파드는 시작됨**
+        - 이벤트에 `InvalidVariableNames` 오류 기록
+
+### Secret 전용 모범 사례
+
+- API 자격 증명 자동 마운팅 제어
+    
+    ```yaml
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: app1-svcacct
+    automountServiceAccountToken: false
+    
+    ```
+    
+    ```yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: app1-pod
+    spec:
+      serviceAccountName: app1-svcacct
+      automountServiceAccountToken: false
+    
+    ```
+    
+- 외부 시크릿 관리 시스템
+    - **권장 솔루션**:
+        - HashiCorp Vault
+        - AWS Secrets Manager
+        - Google Cloud KMS
+        - Azure Key Vault
+        - **ExternalSecrets Operator** (Linux 재단 프로젝트)
+
+- imagePullSecrets 자동 할당
+    
+    ```bash
+    # Docker registry secret 생성
+    kubectl create secret docker-registry registryKey \
+      --docker-server=myreg.azurecr.io \
+      --docker-username=myreg \
+      --docker-password=$up3r$3cr3tP@ssw0rd \
+      --docker-email=ignore@dummy.com
+    
+    # 기본 서비스 계정에 패치
+    kubectl patch serviceaccount default -p \
+      '{"imagePullSecrets": [{"name": "registryKey"}]}'
+    
+    ```
+    
+- 보안 책임 분리
+    - **보안 관리팀**: Secret 생성 및 암호화
+    - **개발팀**: 예상되는 Secret 이름만 참조
+    - **CI/CD 도구**: 하드웨어 보안 모듈(HSM) 활용
+
+## RBAC (Role-Based Access Control)
+
+- 주체 (Subject)
+    1. **사용자**: 외부 인증 모듈에서 관리
+        - 기본 인증
+        - x.509 클라이언트 인증서
+        - 베어러 토큰 (OpenID Connect 등)
+    2. **서비스 계정**: Kubernetes 내부 관리
+        - 네임스페이스에 바인딩
+        - 프로세스용 (사람이 아닌)
+    3. **그룹**: 사용자 그룹
+
+- 규칙 (Rules)
+    - **동사**: `create`, `get`, `update`, `delete`, `watch`, `list`, `exec`
+    - **리소스**: API 객체 (pods, deployments 등)
+    - **API 그룹**: 코어 API (`apiGroup: ""`), apps API 등
+- 역할 (Roles)
+    - **Role**: 네임스페이스 범위
+    - **ClusterRole**: 클러스터 전체 범위
+- 역할 바인딩 (Role Bindings)
+    - **RoleBinding**: 네임스페이스 범위
+    - **ClusterRoleBinding**: 클러스터 전체 범위
+- Role 예시
+    
+    ```yaml
+    kind: Role
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      namespace: default
+      name: pod-viewer
+    rules:
+    - apiGroups: [""] # 코어 API 그룹
+      resources: ["pods"]
+      verbs: ["get", "watch", "list"]
+    ```
+    
+- RoleBinding 예시
+    
+    ```yaml
+    kind: RoleBinding
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      name: noc-helpdesk-view
+      namespace: default
+    subjects:
+    - kind: User
+      name: helpdeskuser@example.com
+      apiGroup: rbac.authorization.k8s.io
+    roleRef:
+      kind: Role
+      name: pod-viewer
+      apiGroup: rbac.authorization.k8s.io
+    ```
+    
+
+## RBAC 모범 사례
+
+애플리케이션 RBAC 원칙
+
+**기본 규칙**:
+
+> "Kubernetes에서 실행되도록 개발된 애플리케이션에는 RBAC 역할 및 이와 관련된 역할 바인딩이 거의 필요하지 X. 
+애플리케이션 코드가 Kubernetes API와 직접 상호 작용하는 경우에만 RBAC 구성이 필요"
+> 
+> 
+> 계층적 보안 구조
+> 
+> 1. **인증 (Authentication)**: 신원 확인
+> 2. **권한 부여 (Authorization)**: RBAC를 통한 접근 제어
+> 3. **입학 제어 (Admission Control)**: 정책 기반 요청 검증
+- 최소 권한 원칙
+    - 새 서비스 계정 생성
+    - 목표 달성에 **필요한 최소한의 권한**만 부여
+    - 파드 사양에 서비스 계정 지정
+- ID 관리 및 인증
+    - **권장 구성**:
+        - **OpenID Connect** 서비스 사용
+        - **2단계 인증** 지원
+        - 사용자 그룹을 최소 권한 역할에 매핑
+- 특별 권한 관리
+    - **적시 액세스 (JIT) 시스템**:
+        - SRE (Site Reliability Engineers)
+        - 운영자
+        - 단기간 에스컬레이션 권한이 필요한 사용자
+        - 더 엄격한 감사가 적용되는 별도 ID 사용
+
+- CI/CD 도구 관리
+    - **전용 서비스 계정** 사용
+    - 클러스터 내 감사 추적 가능
+    - 배포/삭제 주체 식별 가능
+
+- Helm 관련 보안
+    - Helm v2 (Tiller) 사용 시
+        - **Tiller**: Kubernetes 클러스터 내부에서 실행되는 서버 컴포넌트
+            - **Tiller가** Helm 차트의 실제 배포 수행, Kubernetes API와 직접 통신
+        - `kube-system`의 기본 Tiller 사용 금지 (cluster-admin 권한으로 실행)
+        - **각 네임스페이스별 Tiller 전용 서비스 계정** 생성 (보안상 권장)
+        - 네임스페이스별 Tiller 배포
+    - 권장사항
+        - **Helm v3으로 마이그레이션** - 클라이언트 기반 아키텍처로 Tiller 불필요
+        - **Helm v3의 장점**:
+            - 완전히 **클라이언트 기반 아키텍처**
+            - 보안 복잡성 제거
+            - RBAC 권한 단순화
+            - 네임스페이스별 Tiller 관리 불필요
+            - 더 나은 멀티테넌시 지원
+
+- Secret API 접근 제한
+    - **엄격한 제한 정책**:
+        - `watch` 및 `list` 권한을 필요한 애플리케이션으로만 제한
+        - 특정 Secret 접근 시 `get` 사용을 직접 할당된 Secret으로만 제한
+        - 애플리케이션이 해당 네임스페이스의 모든 Secret을 볼 수 없도록 방지
