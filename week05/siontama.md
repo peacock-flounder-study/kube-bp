@@ -13,10 +13,8 @@ kubenet은 바로 사용 가능한 가장 기본적이고 단순한 네트워크
 
 9.3 쿠버네티스 서비스
 
-파드가 제공하는 서비스에 바로 액세스하는 것은 효율적이지 않다.
-서비스 API를 통해 쉽게 변하지 않는 IP와 포트를 할당하고 매핑하자.
-
-Cluster IP, NodePort, ExternalName, LoadBalancer
+파드가 제공하는 서비스에 바로 액세스하는 것은 효율적이지 않음
+서비스 API를 통해 쉽게 변하지 않는 IP와 포트를 할당
 
 ingress와 ingress controller는 HTTP 수준의 라우터
 
